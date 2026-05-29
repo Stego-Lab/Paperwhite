@@ -1,0 +1,595 @@
+diff --git a/src/Displays/BaseDisplay/layout.cpp b/src/Displays/BaseDisplay/layout.cpp
+index b57598b..2bd70c0 100644
+--- a/src/Displays/BaseDisplay/layout.cpp
++++ b/src/Displays/BaseDisplay/layout.cpp
+@@ -190,6 +190,8 @@ void BaseDisplay::landscape() {
+     // Orient with LoRa antenna facing up
+     #if defined(Vision_Master_E290)
+         setRotation(1);
++    #elif defined(WIRELESS_PAPER)
++        setRotation(1);   // TODO: am Geraet verifizieren (ggf. 1 oder 3)
+     #else
+         setRotation(3);
+     #endif
+diff --git a/src/Displays/E0213A367/E0213A367.h b/src/Displays/E0213A367/E0213A367.h
+new file mode 100644
+index 0000000..4cd01a6
+--- /dev/null
++++ b/src/Displays/E0213A367/E0213A367.h
+@@ -0,0 +1,52 @@
++#include <Arduino.h>
++#include "Displays/BaseDisplay/base.h"
++
++// Connector label: HINK-E0213A162-A1 (hidden, printed on reverse)
++class E0213A367 : public BaseDisplay {
++
++    // Display Config
++    // ======================
++    private:
++        static const uint16_t panel_width = 128;                                    // Display width
++        static const uint16_t panel_height = 250;                                   // Display height
++        static const uint16_t drawing_width = 122;                                  // Usable width
++        static const uint16_t drawing_height = 250;                                 // Usable height
++        static const Color supported_colors = (Color) ( BLACK | WHITE );            // Colors available for drawing
++
++    // Constructors
++    // ======================
++    public:
++
++        #if defined(WIRELESS_PAPER) || defined(Vision_Master_E213)
++            E0213A367() : BaseDisplay(PIN_DISPLAY_DC, PIN_DISPLAY_CS, PIN_DISPLAY_BUSY, DEFAULT_SDI, DEFAULT_CLK, DEFAULT_PAGE_HEIGHT)
++                { init(); }
++        #else
++            /* --- ERROR: Wrong build env. See https://github.com/todd-herbert/heltec-eink-modules/blob/main/docs/README.md#installation --- */   E0213A367(uint16_t page_height = DEFAULT_PAGE_HEIGHT) = delete;
++        #endif
++
++
++    // Setup
++    // ==========================
++    private:
++        void init();        // Once instantiated, pass config to base
++
++
++    // Virtual methods
++    // ==========================
++    private:
++        void configFull();              // Configure panel to use full refresh
++        void configPartial();           // Configure panel to use partial refresh
++        void activate();
++
++        // Display specific formatting of memory locations 
++        void setMemoryArea(uint16_t sx, uint16_t sy, uint16_t ex, uint16_t ey); // Controller IC requires different formatting of X and Y co-ordinates
++        void calculateMemoryArea( int16_t &sx, int16_t &sy, int16_t &ex, int16_t &ey,                        
++                                    int16_t region_left, int16_t region_top, int16_t region_right, int16_t region_bottom );
++         
++
++
++    // Disabled methods
++    // ==========================
++    private:
++        /* --- Error: TURBO gives no performance boost on these platforms --- */        void fastmodeTurbo(bool) {}
++};
+\ No newline at end of file
+diff --git a/src/Displays/E0213A367/hardware.cpp b/src/Displays/E0213A367/hardware.cpp
+new file mode 100644
+index 0000000..92abb85
+--- /dev/null
++++ b/src/Displays/E0213A367/hardware.cpp
+@@ -0,0 +1,47 @@
++#include "E0213A367.h"
++
++// Inform the display of selected memory area
++void E0213A367::setMemoryArea(uint16_t sx, uint16_t sy, uint16_t ex, uint16_t ey) {
++
++    // Data entry mode - Left to Right, Top to Bottom
++    sendCommand(0x11);
++    sendData(0x03);
++
++    // Select controller IC memory region to display a fullscreen image
++    sendCommand(0x44); // Memory X start - end
++    sendData(sx);
++    sendData(ex);
++    sendCommand(0x45); // Memory Y start - end
++    sendData(sy);
++    sendData(ey);
++
++    // Place the cursor at the start of this memory region, ready to send image data x=0 y=0
++    sendCommand(0x4E); // Memory cursor X
++    sendData(sx);
++    sendCommand(0x4F); // Memory cursor y
++    sendData(sy);
++}
++
++void E0213A367::calculateMemoryArea( int16_t &sx, int16_t &sy, int16_t &ex, int16_t &ey,                        
++                                            int16_t region_left, int16_t region_top, int16_t region_right, int16_t region_bottom ) {
++    sx = region_left / 8;
++    sy = region_top;
++    ex = region_right / 8;
++    ey = region_bottom;
++}
++
++void E0213A367::activate() {
++    // Specify the update operation to run
++    sendCommand(0x22);
++    
++    if ( fastmode_state == OFF )
++        sendData(0xF7);
++    else
++        sendData(0xFF);
++
++    // Execute the update
++    sendCommand(0x20);
++
++    // Block while the command runs
++    wait();
++}
+diff --git a/src/Displays/E0213A367/mode.cpp b/src/Displays/E0213A367/mode.cpp
+new file mode 100644
+index 0000000..c3ff3e8
+--- /dev/null
++++ b/src/Displays/E0213A367/mode.cpp
+@@ -0,0 +1,31 @@
++#include "E0213A367.h"
++
++void E0213A367::configFull() {
++    // This command (0x37) is poorly documented
++    // Purpose is to specify which of the pre-programmed waveforms are for full refresh, and which are for fast refresh (?)
++    sendCommand(0x37); // "Write Register for Display Option" ?
++    sendData(0x00);    // "Spare VCOM OTP selection" ?
++    sendData(0x80);    // "Display Mode for WS[7:0]" ?
++    sendData(0x03);    // "Display Mode for WS[15:8]" ?
++    sendData(0x0E);    // "Display Mode [23:16]" ?
++
++    sendCommand(0x3C); // Border Waveform
++    sendData(0x01); 
++
++    wait(); 
++}
++
++void E0213A367::configPartial() {
++    // This command (0x37) is poorly documented
++    // Purpose is to specify which of the pre-programmed waveforms are for full refresh, and which are for fast refresh (?)
++    sendCommand(0x37); // "Write Register for Display Option" ?
++    sendData(0x00);    // "Spare VCOM OTP selection" ?
++    sendData(0x80);    // "Display Mode for WS[7:0]" ?
++    sendData(0x03);    // "Display Mode for WS[15:8]" ?
++    sendData(0x0E);    // "Display Mode [23:16]" ?
++
++    sendCommand(0x3C);  // Border Waveform
++    sendData(0x80);
++
++    wait();
++}
+diff --git a/src/Displays/E0213A367/setup.cpp b/src/Displays/E0213A367/setup.cpp
+new file mode 100644
+index 0000000..4002b6b
+--- /dev/null
++++ b/src/Displays/E0213A367/setup.cpp
+@@ -0,0 +1,18 @@
++#include "E0213A367.h"
++
++void E0213A367::init() {
++    // Pass information to base class, once instantiated
++    BaseDisplay::panel_width = this->panel_width;
++    BaseDisplay::panel_height = this->panel_height;
++
++    BaseDisplay::drawing_width = this->drawing_width;
++    BaseDisplay::drawing_height = this->drawing_height;
++
++    BaseDisplay::supported_colors = this->supported_colors;
++
++    // Get the Bounds subclass ready now (in constructor), so that it can be used to init. globals.
++    BaseDisplay::instantiateBounds();
++    
++     // Set the initial drawing config early, so user's config commands before the first update aren't ignored
++    BaseDisplay::initDrawingParams();     
++}
+\ No newline at end of file
+diff --git a/src/Displays/class-aliases.h b/src/Displays/class-aliases.h
+index 14f9fae..5d51a4d 100644
+--- a/src/Displays/class-aliases.h
++++ b/src/Displays/class-aliases.h
+@@ -5,6 +5,8 @@
+ // ------------------------
+     #define EInkDisplay_WirelessPaperV1 DEPG0213BNS800
+     #define EInkDisplay_WirelessPaperV1_1 LCMEN2R13EFC1
++    #define EInkDisplay_WirelessPaperV1_1_1 E0213A367
++    #define EInkDisplay_WirelessPaperV1_2 E0213A367
+     #define EInkDisplay_VisionMasterE213 LCMEN2R13EFC1
+     #define EInkDisplay_VisionMasterE290 DEPG0290BNS800
+ 
+diff --git a/src/configuration_global.h b/src/configuration_global.h
+index 7c6f17a..8261524 100644
+--- a/src/configuration_global.h
++++ b/src/configuration_global.h
+@@ -22,6 +22,7 @@
+ #define HELTEC_STICK_V3 42
+ #define HELTEC_V3 43
+ #define HELTEC_E290 44
++#define HELTEC_WIRELESS_PAPER 45
+ #define TBEAM_1262 45
+ #define T_DECK_PLUS 46
+ #define TBEAM_SUPREME 47
+diff --git a/src/esp32/esp32_functions.cpp b/src/esp32/esp32_functions.cpp
+index e6da58d..a0e97b7 100644
+--- a/src/esp32/esp32_functions.cpp
++++ b/src/esp32/esp32_functions.cpp
+@@ -20,10 +20,14 @@
+ #elif defined(BOARD_T_DECK)
+ #elif defined(BOARD_T_DECK_PLUS)
+ #elif defined(BOARD_T_DECK_PRO)
+-#elif defined BOARD_E290
++#elif (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+ #include "heltec-eink-modules.h"
+ 
++#if defined(BOARD_E290)
+ extern EInkDisplay_VisionMasterE290 e290_display;
++#elif defined(BOARD_WIRELESS_PAPER)
++extern EInkDisplay_WirelessPaperV1_2 e290_display;
++#endif
+ 
+ #include "Fonts/FreeSans9pt7b.h"
+ #include "Fonts/FreeSansBold12pt7b.h"
+@@ -39,7 +43,7 @@ extern EInkDisplay_VisionMasterE290 e290_display;
+ 
+ void initDisplay()
+ {
+-#if ! defined(BOARD_E290) && ! defined(BOARD_T_DECK) && ! defined(BOARD_T_DECK_PLUS) && ! defined(BOARD_TRACKER) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
++#if ! (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) && ! defined(BOARD_T_DECK) && ! defined(BOARD_T_DECK_PLUS) && ! defined(BOARD_TRACKER) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
+     Serial.println(F("[INIT]...Auto detecting display:"));
+         
+     int idtype = esp32_isSSD1306(0x3C);
+@@ -74,7 +78,7 @@ void initDisplay()
+ 
+ void startDisplay(char line1[20], char line2[20], char line3[20])
+ {
+-    #if defined(BOARD_E290)
++    #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+ 
+     char cvers[20];
+ 
+diff --git a/src/heltec-eink-modules.h b/src/heltec-eink-modules.h
+index 0e38a3a..3ace14d 100644
+--- a/src/heltec-eink-modules.h
++++ b/src/heltec-eink-modules.h
+@@ -19,7 +19,10 @@
+ //#include "Displays/GDE029A1/GDE029A1.h"                 // Heltec 2.9" BW V2    - Blue tab
+ 
+ // All-in-one "Wireless Paper" boards
+-//#include "Displays/DEPG0213BNS800/DEPG0213BNS800.h"         
+-//#include "Displays/LCMEN2R13EFC1/LCMEN2R13EFC1.h"
++#ifdef WIRELESS_PAPER
++//#include "Displays/DEPG0213BNS800/DEPG0213BNS800.h"     // Wireless Paper V1
++//#include "Displays/LCMEN2R13EFC1/LCMEN2R13EFC1.h"       // Wireless Paper V1.1 / Vision Master E213
++#include "Displays/E0213A367/E0213A367.h"                 // Wireless Paper V1.1.1 / V1.2
++#endif
+ 
+ #endif
+\ No newline at end of file
+diff --git a/src/loop_functions.cpp b/src/loop_functions.cpp
+index ddb30b9..de545ee 100644
+--- a/src/loop_functions.cpp
++++ b/src/loop_functions.cpp
+@@ -197,10 +197,14 @@ char msg_text[MAX_MSG_LEN_PHONE * 2] = {0};
+ 
+ unsigned int _GW_ID = 0x12345678; // ID of our Node
+ 
+-#if defined (BOARD_E290)
++#if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+ #include "heltec-eink-modules.h"
+ 
++#if defined(BOARD_E290)
+ EInkDisplay_VisionMasterE290 e290_display;
++#elif defined(BOARD_WIRELESS_PAPER)
++EInkDisplay_WirelessPaperV1_2 e290_display;   // gleicher Instanzname -> bestehende Zeichenaufrufe bleiben unveraendert
++#endif
+ 
+ #include "Fonts/FreeMonoBold9pt7b.h"
+ #include "Fonts/FreeMonoBold12pt7b.h"
+@@ -218,7 +222,7 @@ int dzeile[6] = {42, 52, 62, 0, 0, 0};
+ int dzeile[6] = {8, 21, 31, 41, 51, 61};
+ #endif
+ 
+-#if !defined (BOARD_E290) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK) && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
++#if !(defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK) && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
+ 
+ #include <U8g2lib.h>
+ 
+@@ -708,7 +712,7 @@ int esp32_isSSD1306(int address)
+ 
+ void E290DisplayUpdate()
+ {
+-    #ifdef BOARD_E290
++    #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+     e290_display.update();
+     #endif
+ }
+@@ -717,14 +721,14 @@ void sendDisplay1306(bool bClear, bool bTransfer, int x, int y, char *text)
+ {
+     #if !defined (BOARD_T_DECK)  && !defined (BOARD_T_DECK_PLUS)
+ 
+-    #if !defined (BOARD_E290) && !defined (BOARD_TRACKER) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
++    #if !(defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) && !defined (BOARD_TRACKER) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
+         if(u8g2 == NULL)
+             return;
+     #endif
+ 
+ 	if(bClear || (x == 0 && y== 0) || (x == 0 && memcmp(text, "#F", 2) == 0))
+     {
+-        #if defined (BOARD_E290)
++        #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+             e290_display.clearMemory();
+ 
+         	if(memcmp(text, "#F", 2) == 0)
+@@ -774,7 +778,7 @@ void sendDisplay1306(bool bClear, bool bTransfer, int x, int y, char *text)
+     if(bTransfer)
+     {
+         //Serial.println("Transfer");
+-        #if defined BOARD_E290
++        #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+             if(pageLineAnz > 0)
+             {
+                 for(int its=0;its<pageLineAnz;its++)
+@@ -1148,12 +1152,12 @@ void sendDisplayTime()
+             pagePointer=PAGE_MAX-1;
+     }
+ 
+-    #if !defined (BOARD_E290) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK)  && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
++    #if !(defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK)  && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
+         if(u8g2 == NULL)
+             return;
+     #endif
+ 
+-    #if defined (BOARD_E290) || defined (BOARD_T_DECK)  || defined (BOARD_T_DECK_PLUS) || defined (BOARD_T5_EPAPER)
++    #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) || defined (BOARD_T_DECK)  || defined (BOARD_T_DECK_PLUS) || defined (BOARD_T5_EPAPER)
+         return;
+     #endif
+ 
+@@ -1246,7 +1250,7 @@ void sendDisplayMainline()
+         snprintf(cbatt, sizeof(cbatt), " USB");
+  #endif
+ 
+- #if defined(BOARD_E290)
++ #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+     if(global_batt > 4300.0)
+         snprintf(cbatt, sizeof(cbatt), " USB");
+  #endif
+@@ -1576,7 +1580,7 @@ void sendDisplayText(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
+ 
+         return;
+ 
+-    #elif defined (BOARD_E290)
++    #elif (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+ 
+     sendDisplayMainline();
+ 
+@@ -1898,7 +1902,7 @@ void sendDisplayPosition(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
+ 
+     sendDisplayMainline();
+ 
+-    #ifdef BOARD_E290
++    #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+         sendDisplay1306(false, true, 0, dzeile[0], (char*)"#S");
+     #endif
+ 
+@@ -2003,7 +2007,7 @@ void sendDisplayPosition(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
+     memset(decode_text, 0x00, sizeof(decode_text));
+     ipt=0;
+ 
+-    #ifdef BOARD_E290
++    #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+ 
+     // dir_to
+     e290_display.drawCircle(275, 107,
+@@ -2037,7 +2041,7 @@ void sendDisplayPosition(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
+                     if(aprsmsg.msg_source_fw_version > 13)
+                         alt = (int)((float)alt * 0.3048);
+ 
+-                    #ifdef BOARD_E290
++                    #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+                         DrawRssi(3, 117, rssi);
+ 
+                         snprintf(msg_text, sizeof(msg_text), "ALT:%im", alt);
+@@ -2064,7 +2068,7 @@ void sendDisplayPosition(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
+ 
+ }
+ 
+-#ifdef BOARD_E290
++#if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+ void DrawDirection(float angle, int cx, int cy, int radius)
+ {
+     float displacedAngle = angle - 90;
+@@ -2816,7 +2820,7 @@ void sendPosition(unsigned long uintervall, double lat, char lat_c, double lon,
+             tdeck_send_track_view();
+         #elif defined(HAS_TFT)
+         // none
+-        #elif defined(BOARD_E290)
++        #elif (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+         // none
+         #elif defined(BOARD_TRACKER)
+         // none
+diff --git a/src/loop_functions.h b/src/loop_functions.h
+index 96159e6..729a05b 100644
+--- a/src/loop_functions.h
++++ b/src/loop_functions.h
+@@ -13,7 +13,7 @@
+ #endif
+ 
+ // OLED Display 1306 128 x 64 px
+-#if !defined (BOARD_E290) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK) && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
++#if !(defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)) && !defined (BOARD_TRACKER) && !defined (BOARD_T_DECK) && !defined (BOARD_T_DECK_PLUS) && !defined (BOARD_T5_EPAPER) && !defined (BOARD_T_DECK_PRO)
+ #include <U8g2lib.h>
+ #endif
+ 
+@@ -81,7 +81,7 @@ double cround4abs(double dvar);
+ int conv_fuss(int alt_meter);
+ int conv_meter(int alt_fuss);
+ 
+-#ifdef BOARD_E290
++#if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+ void DrawDirection(float angle, int cx, int cy, int radius);
+ void DrawRssi(int cx, int cy, int16_t rssi);
+ double degreesToRadians(double degrees);
+diff --git a/src/lora_setchip.cpp b/src/lora_setchip.cpp
+index f489a5e..f4dd82e 100644
+--- a/src/lora_setchip.cpp
++++ b/src/lora_setchip.cpp
+@@ -37,7 +37,7 @@
+     extern int transmissionState;
+ #endif
+ 
+-#if defined(SX1262_V3) || defined(SX1262_E290) || defined(SX1262_V4)
++#if defined(SX1262_V3) || defined(SX1262_E290) || defined(SX1262_WIRELESS_PAPER) || defined(SX1262_V4)
+     #include <RadioLib.h>
+     extern SX1262 radio;
+     extern int transmissionState;
+@@ -661,7 +661,7 @@ bool lora_setchip_new(float rf_freq, float rf_bw, int rf_sf, int rf_cr, int rf_s
+     }
+ 
+     // CRC
+-    #if defined(SX127X) || defined(SX1262_V3) || defined(SX1262_E290) || defined(SX126X) || defined(SX126x_V3) || defined(SX1262X) || defined(USING_SX1262) || defined(SX1262_V4)
++    #if defined(SX127X) || defined(SX1262_V3) || defined(SX1262_E290) || defined(SX1262_WIRELESS_PAPER) || defined(SX126X) || defined(SX126x_V3) || defined(SX1262X) || defined(USING_SX1262) || defined(SX1262_V4)
+     uint8_t icrc = 0;
+     #if defined(SX127X)
+         icrc = rf_crc;
+diff --git a/src/onebutton_functions.cpp b/src/onebutton_functions.cpp
+index 4ae5889..1ab7318 100644
+--- a/src/onebutton_functions.cpp
++++ b/src/onebutton_functions.cpp
+@@ -65,7 +65,7 @@ void singleClick()
+         }
+     }
+ 
+-    #ifdef BOARD_E290
++    #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+         iDisplayType=9;
+     #else
+         iDisplayType=0;
+@@ -139,7 +139,7 @@ void PressLong()
+ 
+   bShowHead=false;
+ 
+-  #ifdef BOARD_E290
++  #if defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER)
+       sendDisplayMainline();
+       E290DisplayUpdate();
+   #else
+@@ -167,7 +167,7 @@ void init_onebutton()
+ /* Initialize a new OneButton instance for a button connected to digital
+ *  pin and GND, which is active low [2] and uses the internal pull-up resistor.
+ */
+-    #if defined (BOARD_E290)
++    #if (defined(BOARD_E290) || defined(BOARD_WIRELESS_PAPER))
+       // btn.setup( /*GPIO=*/ iButtonPin, /*active LOW=*/ true, /*pull-up=*/ false);
+       btn.setup( /*GPIO=*/ iButtonPin, INPUT, /*active LOW=*/ true);
+     #else
+diff --git a/variants/wireless-paper/configuration.h b/variants/wireless-paper/configuration.h
+new file mode 100644
+index 0000000..4ae0034
+--- /dev/null
++++ b/variants/wireless-paper/configuration.h
+@@ -0,0 +1,66 @@
++/*
++definitions for HELTEC Wireless Paper (V1.2 / E0213A367 panel)
++Abgeleitet von vision-master-e290. Keine Onboard-Sensoren, kein GPS.
++ESP32-S3FN8 + SX1262, 2.13" E-Ink 250x122 (Panel 128x250).
++*/
++
++#pragma once
++
++#include <Arduino.h>
++#include <configuration_global.h>
++
++// Wireless Paper specific config
++#define MODUL_HARDWARE HELTEC_WIRELESS_PAPER
++
++#define RF_FREQUENCY 433.175000          // Hz  (AT 70cm, wie E290)
++#define LORA_APRS_FREQUENCY 433.775000   // Hz
++
++// --- Keine Onboard-Sensoren auf der Wireless Paper -> bewusst NICHT aktiviert ---
++// (kein ENABLE_GPS / BMX280 / BMP390 / AHT20 / SHT21 / BMX680 / MCP23017 / INA226 / MCU811 / RTC / SOFTSER)
++
++#define TX_POWER_MAX 22  // max 22 dBm
++#define TX_POWER_MIN 2
++
++// SX1262 mit identischer Pinbelegung wie E290 -> eigener Schalter, additiv in lora_setchip.cpp
++#define SX1262_WIRELESS_PAPER
++
++#define LORA_PREAMBLE_LENGTH DEFAULT_PREAMPLE_LENGTH  // Same for Tx and Rx
++
++#define WAIT_TX 5         // ticks waiting after Lora TX in doTX()
++
++#define TX_OUTPUT_POWER 22  // SX1262 up to +22dBm
++#define CURRENT_LIMIT 140   // mA
++
++// RadioLib Modem-Parameter (wie E290)
++#define LORA_CR 6
++#define LORA_BANDWIDTH 250
++#define LORA_SF 11
++
++// =============================================
++// GPIOs
++// ===== Analog / Batterie =====
++#define ANALOG_PIN 0
++#define ANALOG_REFRESH_INTERVAL 30 // sec messure intervall
++
++// PRG-Taster der Wireless Paper liegt auf GPIO0
++#define BUTTON_PIN 0
++
++#define OneWire_GPIO  99 // ungenutzt
++
++// TODO: Batteriemessung am Gerät verifizieren/kalibrieren.
++// Die Wireless Paper hat einen ADC-Spannungsteiler; Pin/Faktor vor Produktivnutzung pruefen.
++#define BATTERY_PIN 1
++#define ADC_MULTIPLIER 4.9245
++
++// E-Ink-Versorgung (VEXT=GPIO45, active LOW) wird von der Plattform-Schicht
++// src/Platforms/WirelessPaper/power_controls.cpp (#ifdef WIRELESS_PAPER) gehandhabt.
++// Daher hier KEINE VEXT_ENABLE-Defines noetig.
++
++// PCB Wiring - LoRa - nur fuer prepareToSleep() / Referenz
++#define PIN_LORA_DIO_1          14
++#define PIN_LORA_NSS            8
++#define PIN_LORA_NRST           12
++#define PIN_LORA_BUSY           13
++#define PIN_LORA_SCK            9
++#define PIN_LORA_MISO           11
++#define PIN_LORA_MOSI           10
+diff --git a/variants/wireless-paper/platformio.ini b/variants/wireless-paper/platformio.ini
+new file mode 100644
+index 0000000..d2e695d
+--- /dev/null
++++ b/variants/wireless-paper/platformio.ini
+@@ -0,0 +1,32 @@
++[env:wireless-paper]
++platform = espressif32@^6.6.0
++board = heltec_wifi_lora_32_V3
++framework = arduino
++monitor_speed = 115200
++monitor_filters = esp32_exception_decoder
++board_upload.use_1200bps_touch = true
++board_build.partitions = partitions-4MB-safeboot.csv
++board_build.app_partition_name = app
++upload_protocol = custom
++upload_command = pio pkg exec -p "tool-esptoolpy" -- esptool -b 921600 write_flash 0x0000 ${platformio.build_dir}/${this.__env__}/bootloader.bin 0xE000 otadata.bin 0x8000 ${platformio.build_dir}/${this.__env__}/partitions.bin 0x10000 safeboot-s3.bin 0xC0000 ${platformio.build_dir}/${this.__env__}/firmware.bin
++build_src_filter = 
++	+<*>
++	-<nrf52/*>
++	-<t-deck/*>
++	-<t-deck-pro/*>
++	-<t5-epaper/*>
++	-<safeboot/*>
++	-<lib/lvgl/*>
++	;use Displays, Fonts, GFX_Root, Platforms
++lib_ignore = BQ27220, epdiy, es7210, lvgl, SensorLib, TFT_eSPI, U8g2
++lib_deps = 
++	${libs.lib_deps}
++	${esp32libs.lib_deps}
++	ropg/Heltec_ESP32_LoRa_v3@^0.9.1
++build_flags = 
++	${common.build_flags}
++	-D ARDUINO_USB_CDC_ON_BOOT=1
++	-D MONITOR_SPEED=${upload_settings.monitor_speed}
++	-D BOARD_WIRELESS_PAPER="Wireless_Paper"
++	-D WIRELESS_PAPER
++	-I variants/${this.__env__}
