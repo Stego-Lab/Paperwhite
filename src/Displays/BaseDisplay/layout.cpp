@@ -187,11 +187,14 @@ void BaseDisplay::setWindow(uint16_t left, uint16_t top, uint16_t width, uint16_
 }
 
 void BaseDisplay::landscape() {
-    // Orient with LoRa antenna facing up
+    // Orient with LoRa antenna facing up.
+    // Hinweis: Die --rotate-Drehung wird NICHT hier gesetzt, sondern zentral in
+    // applyDisplayRotation() (esp32_functions.cpp), das beim Boot direkt nach diesem landscape()
+    // laeuft und den Wert ueberschreibt. landscape() liefert nur die Werks-Grundausrichtung.
     #if defined(Vision_Master_E290)
         setRotation(1);
     #elif defined(WIRELESS_PAPER)
-        setRotation(1);   // TODO: am Geraet verifizieren (ggf. 1 oder 3)
+        setRotation(1);
     #else
         setRotation(3);
     #endif

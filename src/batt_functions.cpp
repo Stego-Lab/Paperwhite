@@ -27,6 +27,11 @@ int BATTshowtime;
 #define CDcount 6
 static int CountDown = CDcount;
 
+#if defined(WP_DISP_PREVIEW)
+// Preview-only: Glitch-Filter (zweite Glaettung mit +/-2%-Ausreisserschutz) zum Testen.
+static float GlitchFilteredVoltage = 0.0f;
+static bool firstGlitch = false;
+#endif
 
 // wird hier nicht verwendet, aber definiert, aber nicht freigegeben
 float global_batt = 0;  // in mV
@@ -109,6 +114,9 @@ void init_batt(void)
 	#ifdef USE_BATT
 		printlndeb("[INIT]...init_batt");
 		firstReading = true;
+		#if defined(WP_DISP_PREVIEW)
+		firstGlitch = false;
+		#endif
 
 		// nach Änderung durch Befehl in command_functions.cpp muss init_batt() aufgerufen werden!
 		BATTshowtime = (int)meshcom_settings.node_analog_batt_faktor / 1000;  // [--batt factor 99xxx.xxx]
@@ -156,8 +164,8 @@ void init_batt(void)
  *
  * @return float Battery level in milli volts 0 ... 4200
  */
-#if defined(BOARD_WIRELESS_PAPER)
-// ----- "AKKU LOW"-Beobachtung (WP) -----
+#if defined(WP_DISP)
+// ----- "AKKU LOW"-Beobachtung (WP + E213-Preview, gemeinsamer 2.13"-Display-Pfad) -----
 // Ringpuffer der letzten Spannungs-Rohwerte. read_batt() laeuft hier mit 2x/Sekunde -> 12 Werte = 6 s.
 // bWpAkkuLow wird vor dem Low-Voltage-Deepsleep gesetzt; das WP-Display zeigt dann statt blank
 // "AKKU LOW" + diese Werte (E-Ink haelt das Bild auch im Schlaf -> ablesbar). Die Hysterese
@@ -181,6 +189,24 @@ int wpBattHistory(float* out, int maxn)
         out[i] = wpVHist[(wpVHistHead - 1 - i + 2 * WP_VHIST_MAX) % WP_VHIST_MAX];
     return n;
 }
+#if defined(WP_DISP_PREVIEW)
+// TK4/K3: grobe Lade-Erkennung ohne VBUS-Pin (die WP hat keinen). Vergleicht das Mittel der
+// 3 neuesten mit dem der 3 aeltesten Rohspannungen im ~5-s-Ringpuffer. Steigt die Spannung
+// erkennbar an (> 30 mV), wird der Akku geladen -> der Low-Voltage-Deepsleep wird unterdrueckt.
+// Hintergrund: firstReading seedet den Filter nach jedem Boot auf fBattMax und unterschreitet
+// die Schwelle dann erneut -> ohne diese Pruefung Boot-Deepsleep-Schleife bei leerem, aber
+// gerade ladendem Akku. Solange der Puffer noch nicht voll ist (erste ~5 s nach Boot), gilt
+// vorsichtshalber "koennte laden" -> kein voreiliger Deepsleep direkt nach dem Boot.
+static bool wpBattIsCharging(void)
+{
+    float h[WP_VHIST_MAX];
+    int n = wpBattHistory(h, WP_VHIST_MAX);   // neueste zuerst
+    if(n < WP_VHIST_MAX) return true;         // Puffer noch nicht voll -> Boot-Gnadenfrist
+    float newest = (h[0] + h[1] + h[2]) / 3.0f;
+    float oldest = (h[n - 1] + h[n - 2] + h[n - 3]) / 3.0f;
+    return (newest - oldest) > 0.03f;          // > 30 mV Anstieg ueber ~5 s -> laedt
+}
+#endif
 #endif
 
 float read_batt(void)
@@ -211,10 +237,28 @@ float read_batt(void)
 		if (firstReading) { filteredVoltage = fBattMax; } // verhindert deepsleep nach REBOOT
 		else { filteredVoltage = alpha * rawVoltage + (1.0f - alpha) * filteredVoltage; }
 
+		#if defined(WP_DISP_PREVIEW)
+		// Preview-only Filterfunktion: exponentielle Glättung 1. Ordnung mit Glitch-Filter
+		if (firstReading) { GlitchFilteredVoltage = fBattMax; } // verhindert deepsleep nach REBOOT
+		else {  // testen, ob Messwert erstmalig ausserhalb des +/-2% Bereiches ist => Glitch
+			if ((rawVoltage >= GlitchFilteredVoltage*0.98) && (rawVoltage <= GlitchFilteredVoltage*1.02)) {
+				// Wert innerhalb Schranken => verrechnen
+				GlitchFilteredVoltage = alpha * rawVoltage + (1.0f - alpha) * GlitchFilteredVoltage;
+				firstGlitch = false;
+			} else { // ausserhalb Schranken
+				if (!firstGlitch) { firstGlitch = true; } // verwerfen & merken als firstGlitch
+				else { // verrechnen = nachziehen
+					GlitchFilteredVoltage = alpha * rawVoltage + (1.0f - alpha) * GlitchFilteredVoltage;
+					firstGlitch = false;
+				}
+			}
+		}
+		// end Glitch
+		#endif
 
 		firstReading = false;
 
-		#if defined(BOARD_WIRELESS_PAPER)
+		#if defined(WP_DISP)
 		wpPushVolt(rawVoltage);   // 2x/s -> letzte 10 Rohwerte fuer die "AKKU LOW"-Anzeige
 		#endif
 
@@ -225,12 +269,23 @@ float read_batt(void)
 			if(bDisplayCont)
 			{
 				bDEBUGLNG = true; // für den nächsten printfdeb language en/de aktivieren
+				#if defined(WP_DISP_PREVIEW)
+				printfdeb("[BATT];%s;raw:;%.3f;V;max:;%.2f;V;fact:;%.4f;filt:;%.3f;V;%.0f;%%;%.3f;V;%u\n",
+					getTimeString().c_str(), rawVoltage, fBattMax, fBattFaktor, filteredVoltage, mv_to_percent(filteredVoltage*1000.0),
+					GlitchFilteredVoltage, firstGlitch ? 1 : 0);
+				#else
 				printfdeb("[BATT];%s;raw:;%.3f;V;max:;%.2f;V;fact:;%.4f;filt:;%.3f;V;%.0f;%%\n",
 					getTimeString().c_str(), rawVoltage, fBattMax, fBattFaktor, filteredVoltage, mv_to_percent(filteredVoltage*1000.0));
+				#endif
 			}
 		}
 
+		#if defined(WP_DISP_PREVIEW)
+		//BatVoltage = filteredVoltage;
+		BatVoltage = GlitchFilteredVoltage;   // Preview: Glitch-bereinigte Spannung als Akkuwert nutzen
+		#else
 		BatVoltage = filteredVoltage;
+		#endif
 
 		// Board spezifische Modifikation
 		#if defined(BOARD_E22)       // TODO: und auch die anderen E22 !!!
@@ -254,12 +309,28 @@ float read_batt(void)
 		if ((BatVoltage <= (BAT_MIN_VOLTAGE)) && (BatVoltage > 1.0))  // 6.5V für T-Beam 1W, 3.3V für andere Boards
 		{
 			CountDown--;
+			#if defined(WP_DISP_PREVIEW)
+			// TK4/K3: laedt der Akku gerade? Dann CountDown neu armieren, BEVOR der Deepsleep-Block
+			// laeuft -> verhindert die Boot-Deepsleep-Schleife bei leerem, aber ladendem Akku.
+			// Der Original-Deepsleep-Block darunter bleibt dadurch voellig unveraendert.
+			if(CountDown == 0 && wpBattIsCharging())
+			{
+				printlndeb("[BATT]...low Voltage, aber Spannung steigt (laedt) -> kein Deepsleep");
+				CountDown = CDcount;   // neu armieren
+			}
+			#endif
 			if (CountDown == 0) {
 				if(bDisplayCont)
 				{
 					bDEBUGLNG = true; // für den nächsten printfdeb language en/de aktivieren
+					#if defined(WP_DISP_PREVIEW)
+					printfdeb("[BATT];%s;raw:;%.3f;V;max:;%.2f;V;fact:;%.4f;filt:;%.3f;V;%.0f;%%;%.3f\n",
+						getTimeString().c_str(), rawVoltage, fBattMax, fBattFaktor, filteredVoltage, mv_to_percent(filteredVoltage*1000.0),
+						GlitchFilteredVoltage);
+					#else
 					printfdeb("[BATT];%s;raw:;%.3f;V;max:;%.2f;V;fact:;%.4f;filt:;%.3f;V;%.0f;%%\n",
 						getTimeString().c_str(), rawVoltage, fBattMax, fBattFaktor, filteredVoltage, mv_to_percent(filteredVoltage*1000.0));
+					#endif
 				}
 
 				// Abschaltmeldung ausgeben
@@ -272,10 +343,19 @@ float read_batt(void)
 					//boardPWROff();  // nrf52_functions
 				#else
 					ADC_BATT_OFF();
+					#if !(defined(WP_DISP_PREVIEW))
 					// Andere Boards / Original: Display regulaer ausschalten (persistiert node_sset).
 					commandAction((char*)"--display off", isPhoneReady, false);
-					#if defined(BOARD_WIRELESS_PAPER)
-					bWpAkkuLow = true;   // WP-Display zeigt "AKKU LOW" + letzte Werte statt blank
+					#else
+					// TK2/K2+K12 (WP_PREVIEW): "--display off" auf E-Ink bewusst WEGLASSEN. Es ist
+					// auf dem bistabilen Panel sinnlos und teuer - es persistiert node_sset|=0x0002
+					// per save_settings() (Flash-Write bei Tiefstspannung = Korruptionsrisiko) und
+					// erzeugt einen zusaetzlichen Voll-Refresh. Das sichtbare Loeschen + "AKKU LOW"
+					// macht ohnehin wpShowDeepSleep() im --deepsleep -> genau EIN Voll-Refresh, kein
+					// Flash-Write. (Das frueher noetige Boot-Override entfaellt damit fuer diesen Pfad.)
+					#endif
+					#if defined(WP_DISP)
+					bWpAkkuLow = true;   // WP/E213-Display zeigt "AKKU LOW" + letzte Werte statt blank
 					#endif
 					commandAction((char*)"--deepsleep", isPhoneReady, false);
 				#endif

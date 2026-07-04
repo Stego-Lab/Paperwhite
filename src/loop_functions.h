@@ -19,6 +19,9 @@ void sendDisplayHead(bool bInit);
 #if defined(WP_DISP)
 void wpShowStoredMessage(int slot, int idx);   // idx = Index oben rechts (neueste=N..aelteste=1, 0=keiner)
 void wpShowDeepSleep();                         // E-Ink nur loeschen (kein Text) vor dem Deepsleep -> Sleep sichtbar
+#if defined(WP_DISP_PREVIEW)
+void wpShowNoMessage();                         // Preview: "No Message"-Hinweis bei leerem Ringpuffer
+#endif
 #endif
 void sendDisplayTrack();
 void sendDisplayWX();

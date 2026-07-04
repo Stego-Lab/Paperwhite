@@ -99,8 +99,14 @@ void LCMEN2R13EFC1::sendBlankImageData() {
     wait();
 }
 
-// Wait until the display hardware is idle. Inverted on this display
+// Wait until the display hardware is idle. Inverted on this display (BUSY LOW = busy).
+// Mit TIMEOUT abgesichert (analog BaseDisplay::wait): ein nicht-antwortender BUSY-Pin darf das
+// ganze Board nicht endlos blockieren.
 void LCMEN2R13EFC1::wait() {
-    while(digitalRead(pin_busy) == LOW )      // Pin is LOW when busy - this is different than the SSD display controllers
+    uint32_t start = millis();
+    while(digitalRead(pin_busy) == LOW ) {    // Pin is LOW when busy - different than the SSD controllers
         yield();
+        if ((millis() - start) > 8000)        // Timeout 8 s
+            break;
+    }
 }

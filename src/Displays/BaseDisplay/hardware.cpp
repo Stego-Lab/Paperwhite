@@ -60,9 +60,17 @@ void BaseDisplay::reset() {
 }
 
 // Wait until the display hardware is idle. Important as any commands made while "busy" will be discarded.
+// Robustheit: mit TIMEOUT abgesichert. Antwortet der BUSY-Pin nicht (falsch verdrahtetes/nicht
+// initialisiertes Panel, fehlgeschlagenes partial-window), wuerde die Firmware hier sonst ENDLOS
+// haengen -> das ganze Board "steht". Ein E-Ink-Voll-Refresh dauert <=2 s; 8 s sind grosszuegig
+// und greifen im Normalbetrieb (WP/E290) nie. Bricht der Timeout, laeuft loop() weiter (das
+// Display-Update ist dann ggf. unvollstaendig, aber das Board haengt nicht).
 void BaseDisplay::wait() {
+    uint32_t start = millis();
     while(digitalRead(pin_busy) == HIGH) {      // Pin is HIGH when busy
         yield();
+        if ((millis() - start) > 8000)          // Timeout 8 s
+            break;
     }
 }
 

@@ -5,7 +5,31 @@
 **Untersuchter Stand:** Working Tree, Branch `wireless-paper-v11-v12-fixes` @ dev `871da1a` + lokale (uncommitted) WP-Änderungen; geflasht ist `wireless-paper-preview` (mit `WP_PREVIEW`)
 **Methode:** Multi-Agent-Audit (9 parallele Analyse-Perspektiven: 5 Symptom-Hypothesen + 4 Sicherheits-Lenses), ~2,4 Mio. Analyse-Tokens, 75 Roh-Findings, anschließend manuell konsolidiert. Die Kern-Mechanismen (K1–K3, AKKU-LOW-Kette) wurden zusätzlich von Hand im Code nachvollzogen; Findings zu Library-Interna (Busy-Polarität, Panel-Sequenzen) tragen Restunsicherheit (siehe „Limitierungen").
 
-> ⚠️ **Dieser Report beschreibt NUR Änderungsmöglichkeiten. Es wurde KEIN Code geändert.**
+> ⚠️ **Ursprünglich reine Analyse.** Seit 2026-06-17 sind Teile umgesetzt (nur im `WP_PREVIEW`-Build) — siehe **Umsetzungsstand** direkt unten.
+
+---
+
+## 0. Umsetzungsstand (Stand 2026-06-17, alles `WP_PREVIEW`-gated)
+
+| Finding | Maßnahme | Status |
+|---|---|---|
+| **K1** Deepsleep ohne Wakeup | **TK1** — `esp_sleep_enable_ext1_wakeup(GPIO0/PRG)` + Hinweis „Wake: RST/PRG" | ✅ umgesetzt · **am Gerät getestet** |
+| **K7** Sleep-Strom (mA statt µA) | **TK5** — `Platform::prepareToSleep()` (SX1262→SLEEP, VEXT aus) vor Deepsleep | ✅ umgesetzt · **am Gerät getestet** (LoRa nach Wakeup OK) |
+| **K2** `--display off` persistiert Flash | **TK2** — im Low-Voltage-Pfad weggelassen (kein `save_settings()`) | ✅ umgesetzt |
+| **K12** 2 Refreshes + Flash-Write bei Tiefstspannung | **TK2** — nur noch 1 Refresh, kein Flash-Write | ✅ umgesetzt |
+| **K3** Deepsleep-Boot-Schleife | **TK4** — `wpBattIsCharging()` (Lade-Trend über Ringpuffer) unterdrückt Deepsleep | ✅ umgesetzt |
+| **K25/K38** AKKU-LOW grau (Doppel-Refresh) | `wpShowDeepSleep`: `clear()` → **`clearMemory()`** (nur 1 Refresh) | ✅ umgesetzt · **bei voller Spannung getestet** (12 Werte sichtbar) |
+| **K14** Serial-Parser (Bounds/strlen/Timeout) | **FSM-Parser** (OE3WAS) für Serial **+ Telnet**: binärsicher, 90-s-Timeout, Befehls-Vereinzelung, `cBuf`-Overflow gefixt | ✅ umgesetzt · **in Erprobung** |
+| **K13** Button-Pull-up | — | ❌ **FALSE POSITIVE** (Wolfgang): GPIO0-Strapping hat externen Pull-up, `INPUT` ist korrekt |
+| **K4** Chip-ID-Plausibilität (Endlos-Hänger) | — | ⬜ offen (Display-Library) |
+| **K5/K11/K16** `wait()` ohne Timeout | — | ⬜ offen (Display-Library) |
+| **K6** Panel-`wait()` vor Sleep (V1.1 0x02) | teilweise via `delay(100)` vor `prepareToSleep` | 🟡 teil-gemildert |
+| **K8** `is_receiving`/`tx_is_active`-Hänger | — | ⬜ offen (geteilter LoRa-Pfad, „TK3") |
+| **K9** millis()-Wrap (49,7 Tage) | — | ⬜ offen (allgemein, 31 Stellen) |
+| **K10** `--maxv` Division-durch-0 | — | ⬜ offen (allgemein) |
+| **K11/K15** Flash-Hygiene | upstream geht selbst Richtung weniger Persistenz (dev: `node_persist`-Defaults `false`) | 🟡 teils upstream |
+
+**Symptom-Status:** Die heutigen Maßnahmen (TK1/TK5 getestet, AKKU-LOW-Fix getestet) adressieren die **Haupt-Ursachenketten** des Display-Freeze (K1, K7, K2/K12, K3) sowie die graue AKKU-LOW-Anzeige (K25). **K8** (LoRa-Gate, erklärt „AKKU LOW nie erreicht") bleibt offen — der nächste symptomrelevante Kandidat.
 
 ---
 
@@ -133,7 +157,7 @@ Temporärer Testbuild mit `BAT_MIN_VOLTAGE 3.9` (nur Preview) bei vollem Akku �
 | ID | Fund | Ort | Vorschlag |
 |----|------|-----|-----------|
 | K12 | **Abschalt-Sequenz bei Tiefstspannung:** `delay(1000)` + NVS-Flash-Write + **zwei** E-Ink-Voll-Refreshes back-to-back (`--display off`→sendDisplayHead-Clear, dann wpShowDeepSleep) — Brownout mitten im Refresh hinterlässt ein halbes Bild; Flash-Write bei LDO-Dropout-Grenze | batt_functions.cpp:304-317; loop_functions.cpp:1212-1225, 1789-1819 | `--display off` durch reine RAM-Flags ersetzen (siehe V2.2) → nur noch EIN Refresh, kein Flash-Write |
-| K13 | **Button-Init ohne Pull-up** (`btn.setup(pin, INPUT, true)` — Kommentar behauptet Pull-up); GPIO0 hängt allein am externen Pull-up; zudem kollidiert `ANALOG_PIN 0` mit `BUTTON_PIN 0` (`--analog on` würde den Button-GPIO umkonfigurieren). Geister-Long-Press = sofortiger `--deepsleep` | onebutton_functions.cpp:307-313 | `INPUT_PULLUP` auch für WP; ANALOG_PIN für WP auf ungenutzt/99 legen |
+| K13 | **~~Button-Init ohne Pull-up~~ → FALSE POSITIVE (siehe Korrektur unten).** Verbleibt nur: `ANALOG_PIN 0` == `BUTTON_PIN 0` (beide GPIO0); `--analog on` könnte den Button-GPIO umkonfigurieren — bei nicht genutztem `--analog` aber harmlos. | onebutton_functions.cpp:307-313; configuration.h:59/63 | ANALOG_PIN für WP auf ungenutzt/99 legen (nur falls `--analog` je gebraucht wird). **Pull-up NICHT ändern.** |
 | K14 | **`checkSerialCommand`: Schreiben vor Bounds-Check** → bei 600 Bytes ohne Newline fehlt der NUL-Terminator → `strlen()`-Overread (UB, Info-Leak via Debug-Ausgabe); ein 0x00-Phantombyte als erstes Zeichen legt die Konsole bis zum Reboot lahm. Direkt erreichbar über die dokumentierte Floating-RX-Phantombyte-Flut im Akkubetrieb | esp32_main.cpp:3814-3922 | Bounds-Check vor dem Schreiben, immer nullterminieren, 0x00 verwerfen, vollen Puffer ohne Newline verwerfen |
 | K15 | **`save_settings()` = Komplett-Rewrite (~120 Keys) bei JEDER gesendeten Nachricht/Bake/ACK** (node_msgid++ → „Flash rewrite") + bei jedem Boot → unnötig viele Flash-Writes, vergrößert das Brownout-Korruptionsfenster | loop_functions.cpp:3200 u. a.; esp32_flash.cpp:275-524 | node_msgid aus dem Voll-Save herauslösen (eigener putInt oder RTC-RAM + periodisch); Saves unterhalb ~3,4 V verweigern/queuen |
 | K16 | `tx_is_active`-Hänger in 2 Fehlerpfaden (Teil von K8) | lora_functions.cpp:1616-1623; esp32_main.cpp:1997-2030 | siehe V4.3 |
@@ -162,6 +186,7 @@ Temporärer Testbuild mit `BAT_MIN_VOLTAGE 3.9` (nur Preview) bei vollem Akku �
 - **Panel-Hardware-Reset beim Boot:** jeder Boot macht einen harten RST-Toggle + jeder fastmodeOn/Off resettet — ein im Controller-Sleep hängendes Panel überlebt keinen sauberen Boot (sofern der richtige Treiber gewählt wird, siehe K4).
 - **Browse-/Ring-Indizes (Browse 9, PAGE_MAX 10)** ohne Out-of-bounds; `wpMsgFont()` heapfrei; startDisplay-Puffer ohne Overflow.
 - **WP-Boot-Reihenfolge:** kein Code nach dem Boot-Fix setzt `bDisplayOff` wieder true; kein RTC-Memory; Boot nach Deepsleep == normaler Power-On (Display-Init wird nie übersprungen).
+- **K13 Button-Pull-up (FALSE POSITIVE, korrigiert 2026-06-12, Hinweis von Wolfgang):** Der Audit-Vorschlag „`INPUT_PULLUP` auch für WP" ist **falsch und darf NICHT umgesetzt werden.** Hintergrund: OneButton 2.6.2 hat zwei APIs mit *unterschiedlicher* Parameterreihenfolge — Konstruktor `OneButton(pin, activeLow, pullupActive)` vs. Methode `setup(pin, mode, activeLow)`. Der WP-Pfad ([onebutton_functions.cpp:307-309](../src/onebutton_functions.cpp#L307-L309)) nutzt `btn.setup(GPIO0, INPUT, /*activeLow=*/true)`; in `OneButton::setup()` geht der 2. Parameter **direkt an `pinMode(pin, mode)`**. `BUTTON_PIN = 0` ist ein **Strapping-Pin mit externem Pull-up** auf dem Heltec-Board (sonst kein Flash-Boot) — der interne Pull-up ist überflüssig und auf einem Strapping-Pin bewusst *nicht* gesetzt. `INPUT` ist hier die **absichtlich korrekte Wahl**; der Button funktioniert (extern HIGH gehalten, Tastendruck → LOW). Ein erzwungenes `INPUT_PULLUP` würde nur den (überflüssigen) internen Pull-up zuschalten und die bewusste Entscheidung überschreiben.
 
 ---
 

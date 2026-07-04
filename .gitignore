@@ -4,11 +4,14 @@
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
 
-#MESHCOM ignored 
+#MESHCOM ignored
 .pio
 .vscode
 .*
 !/.gitignore
+
+# Lokale Build-/Verteil-Artefakte (ZIPs, Session-Statistiken) - nicht ins Repo
+dist/
 
 # User-specific files
 *.rsuser

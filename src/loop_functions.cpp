@@ -274,6 +274,10 @@ bool bWpCompactLayout = false;
 // der 10-s-Statuszeilen-Refresh die Ziffer nicht wegloescht.
 int wpMsgIdx = 0;
 
+#if defined(WP_DISP_PREVIEW)
+// Preview: Zeitpunkt des "No Message"-Hinweises; mainStartTimeLoop blendet nach 10 s auf Status zurueck.
+unsigned long wpNoMsgShownAt = 0;
+#endif
 
 void wpApplyLayout(bool compact)
 {
@@ -1197,6 +1201,9 @@ void sendDisplayHead(bool bInit)
 
     #if defined(WP_DISP)
     wpMsgIdx = 0;       // Home/Info-Seite -> keine Nachrichten-Ziffer oben rechts
+    #if defined(WP_DISP_PREVIEW)
+    wpNoMsgShownAt = 0; // Statusschirm baut auf -> "No Message"-Rueckblende beenden
+    #endif
     #endif
 
     #ifdef BOARD_T5_EPAPER
@@ -1743,6 +1750,40 @@ void wpShowStoredMessage(int slot, int idx)
     epaper_display.update();
 }
 
+#if defined(WP_DISP_PREVIEW)
+// Preview-Feature: "No Message"-Vollbild-Hinweis, wenn der 1x-Klick KEINE gespeicherte Nachricht
+// findet. mainStartTimeLoop blendet nach 10 s automatisch auf den Statusschirm zurueck (wpNoMsgShownAt).
+void wpShowNoMessage()
+{
+    iDisplayType = 0;
+    wpApplyLayout(true);
+    bDisplayIsOff = false;
+    wpMsgIdx = 0;
+
+    char cbatt[10];
+    if(bDisplayVolt)
+        snprintf(cbatt, sizeof(cbatt), "%5.2fV", global_batt/1000.0);
+    else
+        snprintf(cbatt, sizeof(cbatt), "%5d%%", global_proz);
+    if(global_batt == 0.0)
+        snprintf(cbatt, sizeof(cbatt), "   USB");
+    char st[40];
+    snprintf(st, sizeof(st), "%-4.4s%-1.1s %02i:%02i:%02i%s", SOURCE_VERSION, SOURCE_VERSION_SUB,
+             meshcom_settings.node_date_hour, meshcom_settings.node_date_minute,
+             meshcom_settings.node_date_second, cbatt);
+
+    epaper_display.fastmodeOff();
+    epaper_display.clear();
+    epaper_display.setFont(WP_FONT9);
+    epaper_display.setCursor(3, dzeile[0]);
+    epaper_display.print(st);
+    epaper_display.setCursor(3, dzeile[2]);
+    epaper_display.print("No Message");
+    epaper_display.update();
+
+    wpNoMsgShownAt = millis();   // 10-s-Rueckblende-Timer starten
+}
+#endif
 
 // E-Ink beim Deepsleep loeschen (Voll-Clear). Zwei Faelle:
 //  - LOW-VOLTAGE-Deepsleep (bWpAkkuLow): "AKKU LOW" + die letzten Spannungs-Rohwerte anzeigen
@@ -1761,10 +1802,10 @@ void wpShowDeepSleep()
     // das zweite (mit "AKKU LOW" + Werten) wird grau/unvollstaendig. clearMemory() + EIN update()
     // = nur ein Refresh -> halber Stromhunger, Werte bleiben sichtbar.
     epaper_display.clearMemory();
-    #if defined(BOARD_WIRELESS_PAPER)
-    // WP-spezifische AKKU-LOW-Anzeige (Spannungs-History aus batt_functions). Der E213 nutzt den
-    // gemeinsamen Display-Pfad (WP_DISP) mit, hat aber eine andere Akku-Mess-Logik (ADC_CTRL=46) -
-    // daher hier kein bWpAkkuLow/wpBattHistory fuer E213.
+    #if defined(WP_DISP)
+    // AKKU-LOW-Anzeige (Spannungs-History aus batt_functions) fuer WP + E213-Preview, gemeinsamer
+    // 2.13"-Display-Pfad (WP_DISP). Die Infrastruktur (wpVHist/bWpAkkuLow/wpBattHistory) ist jetzt
+    // WP_DISP-weit (E213 hat eigene Akku-Mess-Logik ADC_CTRL=46, aber dieselbe Anzeige).
     if(bWpAkkuLow)
     {
         epaper_display.setFont(WP_FONT9);
@@ -1788,6 +1829,13 @@ void wpShowDeepSleep()
         }
         bWpAkkuLow = false;
     }
+    #endif
+    #if defined(WP_DISP_PREVIEW)
+    // TK1/K1: Hinweis, wie das Geraet wieder geweckt wird (Wakeup per PRG-Button ist im
+    // --deepsleep-Pfad armiert). dzeile[5] = unterste Zeile im compact-Layout.
+    epaper_display.setFont(WP_FONT9);
+    epaper_display.setCursor(3, dzeile[5]);
+    epaper_display.print("Wake: RST/PRG-Taste");
     #endif
     epaper_display.update();                  // Voll-Refresh -> sichtbar (haelt im Schlaf)
 }
@@ -2005,6 +2053,19 @@ void mainStartTimeLoop()
                 else
                 {
                     #if defined(WP_DISP)
+                    #if defined(WP_DISP_PREVIEW)
+                    // Preview: "No Message"-Hinweis (leerer Puffer) nach 10 s auf den Statusschirm
+                    // zurueckblenden; solange aktiv KEINEN Clock-Teilrefresh darueberlegen.
+                    if(wpNoMsgShownAt != 0)
+                    {
+                        if(!bDisplayIsOff && (millis() - wpNoMsgShownAt) >= 10000)
+                        {
+                            wpNoMsgShownAt = 0;
+                            sendDisplayHead(true);
+                        }
+                    }
+                    else
+                    #endif
                     // E-Ink schonen: Uhrzeit nur alle 10 s aktualisieren (Teilbereich-Refresh
                     // der Statuszeile), statt sekuendlich. sendDisplayTime() ist fuer E-Paper
                     // ohnehin deaktiviert. Im aus-Zustand (--display off) NICHT refreshen.
@@ -2180,6 +2241,9 @@ void sendDisplayText(struct aprsMessage &aprsmsg, int16_t rssi, int8_t snr)
 
     #if defined(WP_DISP)
     wpMsgIdx = 0;       // frisch eintreffende Nachricht -> kein (alter) Browse-Index oben rechts
+    #if defined(WP_DISP_PREVIEW)
+    wpNoMsgShownAt = 0; // echte Nachricht da -> "No Message"-Rueckblende beenden
+    #endif
     #endif
     //
     ///////////////////////////////////////////////////////////

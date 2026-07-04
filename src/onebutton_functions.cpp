@@ -23,8 +23,13 @@
 
 #if defined(WP_DISP)
 // Anzahl der per 1x-Klick durchblaetterbaren letzten Nachrichten (Wireless Paper + E213,
-// gemeinsamer 2.13"-Display-Pfad): die letzten 4 (original-kompatibel).
+// gemeinsamer 2.13"-Display-Pfad). Original/PR: 4 (original-kompatibel). WP-Preview: 9.
+// Der E213 setzt kein WP_PREVIEW -> 4 (wie WP-Original, User-Wunsch).
+#if defined(WP_DISP_PREVIEW)
+#define WP_MSG_BROWSE_MAX 9
+#else
 #define WP_MSG_BROWSE_MAX 4
+#endif
 #endif
 
 void singleClick()
@@ -58,7 +63,11 @@ void singleClick()
       // KEINE Nachricht im Ringpuffer: Original/PR -> Statusschirm; Preview -> "No Message".
       if(pageLastLineAnz[wpNewest] == 0)
       {
+        #if defined(WP_DISP_PREVIEW)
+        wpShowNoMessage();   // 10 s "No Message", dann zurueck zum Status (mainStartTimeLoop)
+        #else
         sendDisplayHead(true);
+        #endif
         wpStatusStep = false;
         pagePointer  = wpNewest;
         return;

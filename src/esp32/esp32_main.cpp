@@ -263,6 +263,11 @@ extern uint8_t txt_msg_len_phone;
 extern unsigned long last_upd_timer;
 extern bool hb_warn_logged;
 
+#if defined(WP_DISP_PREVIEW)
+// WP-Preview Fix #4 (UDP-Stickiness): Zaehler aufeinanderfolgender Heartbeat-Timeouts
+// trotz WiFi-CONNECTED. Nach 3 -> resetMeshComUDP() (siehe Heartbeat Stage 2 unten).
+static uint8_t wpHbStuck = 0;
+#endif
 
 // FreeRTOS Queue for BLE data from NimBLE task to Main Loop
 #include "freertos/queue.h"
@@ -2496,6 +2501,20 @@ void esp32loop()
 
             updateTimeClient = millis();
 
+            #if defined(WP_DISP_PREVIEW)
+            // WP-Preview Fix #1 (NTP-Retry): Das Wireless Paper hat KEINE RTC und kein GPS zum
+            // Ueberbruecken. Schlaegt der NTP-Poll fehl (strTime=="none", z.B. Upstream-Pfad zum
+            // NTP-/MeshCom-Server kurzzeitig tot), wuerde das Original volle 15 Minuten bis zum
+            // naechsten Versuch warten -> "Time Lost"/falsche UTC. Stattdessen updateTimeClient so
+            // zuruckziehen, dass in ~60 s erneut gepollt wird. Underflow-sicher kurz nach Boot.
+            if(strTime.compareTo("none") == 0)
+            {
+                const unsigned long POLL_MS  = 1000UL * 60 * 15;   // Original-Pollintervall
+                const unsigned long RETRY_MS = 1000UL * 60;        // gewuenschter Retry-Abstand (~60 s)
+                unsigned long now = millis();
+                updateTimeClient = (now > (POLL_MS - RETRY_MS)) ? (now - (POLL_MS - RETRY_MS)) : 0;
+            }
+            #endif
         }
         else
         {
@@ -3494,6 +3513,11 @@ void esp32loop()
             {
                 unsigned long hb_age = millis() - last_upd_timer;
 
+                #if defined(WP_DISP_PREVIEW)
+                // WP-Preview Fix #4: Server antwortet wieder (hb_age unter der Warnschwelle)
+                // -> Stuck-Zaehler zuruecksetzen.
+                if(hb_age < (HB_WARN_TIME * 1000)) wpHbStuck = 0;
+                #endif
 
                 // Stage 1: diagnostic warning at 35s
                 if (hb_age > (HB_WARN_TIME * 1000) && !hb_warn_logged)
@@ -3528,6 +3552,19 @@ void esp32loop()
                     {
                         printfdeb("[UDP] Heartbeat timeout %lus — WiFi CONNECTED, server unresponsive, waiting\n",
                                       hb_age / 1000);
+                        #if defined(WP_DISP_PREVIEW)
+                        // WP-Preview Fix #4 (UDP-Stickiness): Das Original WARTET hier nur. Auf dem WP
+                        // (keine RTC; UDP + NTP haengen am selben Upstream-Pfad) bleibt der UDP-Socket
+                        // dann "kleben" und die Uhr laeuft frei. Nach 3 aufeinanderfolgenden Timeouts
+                        // trotz WiFi-CONNECTED den MeshCom-UDP-Pfad neu aufloesen (WiFi+UDP+DNS) ->
+                        // bringt typ. auch den NTP-Pfad zurueck.
+                        if(++wpHbStuck >= 3)
+                        {
+                            printfdeb("[UDP] WP: 3x server unresponsive trotz WiFi -> resetMeshComUDP\n");
+                            resetMeshComUDP();
+                            wpHbStuck = 0;
+                        }
+                        #endif
                     }
 
                     last_upd_timer = millis();
@@ -3843,9 +3880,110 @@ int checkRX(bool bRadio)
     return state;
 }
 
+#if defined(WP_DISP_PREVIEW)
+// ============================================================================================
+// WP_PREVIEW: gehaertete, FSM-basierte serielle Eingabe (Basis OE3WAS, "checkSerialCommand_
+// erweitert"). Ersetzt im Preview die strText-Sammlung. Behebt das Audit-Finding K14
+// (binaersichere Laenge per Index, Bounds-Check VOR dem Schreiben, kein strlen-Overread),
+// bringt ein 90-s-Timeout gegen die floatende-RX-Phantombyte-Flut (siehe Akkubetrieb) und
+// vereinzelt mehrere "--"-Commands in EINER Zeile (Trennung durch " --").
+// FIX ggue. OE3WAS-Vorlage: wpCBuf von [50] auf [160] (= wpCmdBuf) vergroessert -
+// strncpy(cBuf, cmdBuf, cmdLen-3) hatte KEINE Laengenpruefung -> Overflow bei Einzel-Command
+// > 47 Zeichen. Die FSM laeuft fuer USB-Serial UND NetConsole (Telnet), beide via wpRxFeed().
+namespace {
+  enum class WpRxState : uint8_t { IDLE, SAW_COLON, SAW_DASH, MSG_BODY, CMD_BODY };
+  WpRxState wpRxState = WpRxState::IDLE;
+  char   wpMsgBuf[160];        // "::"-Nachricht (max ~149 Nutzzeichen)
+  char   wpCmdBuf[160];        // "--"-Command(s), Sammelpuffer
+  char   wpCBuf[160];          // einzelner vereinzelter Command (FIX: war [50])
+  size_t wpMsgLen = 0;
+  size_t wpCmdLen = 0;
+  unsigned long       wpSeqMillis     = 0;
+  const unsigned long WP_SEQ_TIMEOUT_MS = 90000;   // 90 s
+  const size_t        WP_PREFIX_LEN     = 2;
+
+  inline void wpResetRx() {
+    wpRxState = WpRxState::IDLE; wpMsgLen = 0; wpCmdLen = 0;
+    wpMsgBuf[0] = '\0'; wpCmdBuf[0] = '\0';
+  }
+  inline void wpStartSequence(char ch) {
+    if (ch == ':')      { wpRxState = WpRxState::SAW_COLON; wpMsgBuf[0]=':'; wpMsgLen=1; wpMsgBuf[1]='\0'; wpSeqMillis=millis(); printdeb(ch); }
+    else if (ch == '-') { wpRxState = WpRxState::SAW_DASH;  wpCmdBuf[0]='-'; wpCmdLen=1; wpCmdBuf[1]='\0'; wpSeqMillis=millis(); printdeb(ch); }
+    // sonst: Zeichen ausserhalb einer Sequenz -> verworfen (kein Echo)
+  }
+  inline void wpHandleBackspace(char *buf, size_t &len) {
+    if (len > WP_PREFIX_LEN) { len--; buf[len]='\0'; printdeb('\b'); }
+  }
+  // verarbeitet EIN Zeichen durch die FSM (gemeinsam fuer Serial + NetConsole)
+  inline void wpRxFeed(char ch) {
+    switch (wpRxState) {
+      case WpRxState::IDLE:
+        wpStartSequence(ch);
+        break;
+      case WpRxState::SAW_COLON:
+        if (ch == ':') { wpMsgBuf[1]=':'; wpMsgLen=2; wpMsgBuf[2]='\0'; printdeb(ch); wpRxState=WpRxState::MSG_BODY; }
+        else { wpResetRx(); wpStartSequence(ch); }
+        break;
+      case WpRxState::SAW_DASH:
+        if (ch == '-') { wpCmdBuf[1]='-'; wpCmdLen=2; wpCmdBuf[2]='\0'; printdeb(ch); wpRxState=WpRxState::CMD_BODY; }
+        else { wpResetRx(); wpStartSequence(ch); }
+        break;
+      case WpRxState::MSG_BODY:
+        if (ch == '\b') { wpHandleBackspace(wpMsgBuf, wpMsgLen); }
+        else if (ch == '\n' || ch == '\r' || wpMsgLen >= sizeof(wpMsgBuf)-2) {
+          wpMsgBuf[wpMsgLen++]='\n'; wpMsgBuf[wpMsgLen]='\0'; printdeb('\n');
+          sendMessage(wpMsgBuf, (int)wpMsgLen); wpResetRx();
+        } else { wpMsgBuf[wpMsgLen++]=ch; wpMsgBuf[wpMsgLen]='\0'; printdeb(ch); }
+        break;
+      case WpRxState::CMD_BODY:
+        if (ch == '\b') { wpHandleBackspace(wpCmdBuf, wpCmdLen); }
+        else if (ch == '\n' || ch == '\r' || wpCmdLen >= sizeof(wpCmdBuf)-2) {
+          wpCmdBuf[wpCmdLen++]='\n'; wpCmdBuf[wpCmdLen]='\0'; printdeb('\n');
+          commandAction(wpCmdBuf, isPhoneReady, false); wpResetRx();
+        } else {
+          wpCmdBuf[wpCmdLen++]=ch; wpCmdBuf[wpCmdLen]='\0'; printdeb(ch);
+          // neuer Command in Folge? ("<cmd> --"): bisherigen vereinzelt ausfuehren
+          if (wpCmdLen >= 3 && wpCmdBuf[wpCmdLen-1]=='-' && wpCmdBuf[wpCmdLen-2]=='-' && wpCmdBuf[wpCmdLen-3]==' ') {
+            size_t single = wpCmdLen - 3;                 // Laenge des bisherigen Commands (ohne " --")
+            if (single > sizeof(wpCBuf) - 2) single = sizeof(wpCBuf) - 2;  // doppelter Schutz
+            strncpy(wpCBuf, wpCmdBuf, single);
+            wpCBuf[single]='\n'; wpCBuf[single+1]='\0';
+            printfdeb(">>> single Command: %s\n", wpCBuf);
+            commandAction(wpCBuf, isPhoneReady, false);
+            wpCmdBuf[2]='\0'; wpCmdLen=2;                 // cmdBuf zurueck auf "--" (Praefix des naechsten)
+          }
+        }
+        break;
+    }
+  }
+} // namespace
+#endif
 
 void checkSerialCommand(void)
 {
+#if defined(WP_DISP_PREVIEW)
+    // Timeout IMMER pruefen - auch ohne neue Zeichen (Stille bei haengender Sequenz).
+    if (wpRxState != WpRxState::IDLE && (millis() - wpSeqMillis) >= WP_SEQ_TIMEOUT_MS)
+        wpResetRx();
+
+    // USB-Serial: alle verfuegbaren Zeichen durch die FSM
+    if (Serial) {
+        while (Serial.available() > 0) wpRxFeed((char)Serial.read());
+    }
+    // NetConsole (Telnet): dieselbe FSM, aber mit Telnet-IAC-Skip + CR-Strip wie im Original
+    #ifndef DISABLE_NET_CONSOLE
+    while (netConsoleAvailable()) {
+        char rd = (char)netConsoleRead();
+        if ((uint8_t)rd == 0xFF) {                 // Telnet IAC -> 2 Folgebytes verwerfen
+            if (netConsoleAvailable()) netConsoleRead();
+            if (netConsoleAvailable()) netConsoleRead();
+            continue;
+        }
+        if (rd == '\r') continue;                  // CR strippen, LF behalten
+        wpRxFeed(rd);
+    }
+    #endif
+#else
     // Serial available
     if(Serial)
     {
@@ -3952,4 +4090,5 @@ void checkSerialCommand(void)
         memset(strText, 0x00, sizeof(strText));
         iTxtPos = 0;
     }
+#endif
 }

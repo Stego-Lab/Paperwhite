@@ -47,6 +47,14 @@
 #define WP_DISP
 #endif
 
+// Gemeinsames Preview-Makro: aktiv im WP-Preview-Build (-D WP_PREVIEW) UND im E213-Preview-Build
+// (-D E213_PREVIEW). So teilen sich beide Previews DIESELBEN Erweiterungen (NTP-Retry, UDP-
+// Stickiness, FSM-Serien-Eingabe, Browse 9, Glitch-Filter, "AKKU LOW"-Anzeige, Ladeerkennung,
+// Grau-Fix usw.). Die Original-Builds (env wireless-paper / vision-master-e213) setzen kein Flag.
+#if defined(WP_PREVIEW) || defined(E213_PREVIEW)
+#define WP_DISP_PREVIEW
+#endif
+
 #define DEFAULT_PREAMPLE_LENGTH 32
 
 // Meshcom Params
